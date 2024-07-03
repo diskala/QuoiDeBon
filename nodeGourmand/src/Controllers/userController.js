@@ -1,88 +1,123 @@
-﻿const bcrypt = require('bcrypt')
-const registerModel = require('../Models/register'); // Renommer l'importation pour éviter la confusion avec le nom de la fonction
-const jwt = require('jsonwebtoken');
+﻿const session = require('express-session');
+const bcrypt = require('bcrypt');
+const DB =require('../config/database') 
 const { validationResult } = require('express-validator');
-const { registerValidation } = require('../Validation/Validation');
-const  geolocalisation  = require('../Models/geolocalisation');
- 
+const { expression } = require('joi');
+const { emit } = require('nodemon');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const login = async (req, res) => {
     try {
-        // Vérifier les informations de connexion
-        const user = await registerModel.findOne({ where: { email: req.body.email } });
+        const user = await DB.User.findOne({ where: { email: req.body.email} });
         if (!user) {
-            // Utilisateur non trouvé
-            return res.status(401).json({ success: false, message: "Identifiants ou le mot de passe incorrects" });
+            // return res.status(401).json({ success: false, message: "Identifiants ou le mot de passe incorrects" });
+            console.log("Identifiants ou le mot de passe incorrects");
         }
 
-        // Vérifier le mot de passe
         const validPassword = await bcrypt.compare(req.body.password, user.password);
         if (!validPassword) {
-            // Mot de passe incorrect
             return res.status(401).json({ success: false, message: "Identifiants ou le mot de passe incorrects" });
         }
 
-        // Générer un jeton d'authentification
-        // const token = jwt.sign({ userId: user.id }, 'V3jKGH7VPgu3MfPlWqJ+h/LkKOiq+QUtdDL+SUxvxZU='); // Remplacez 'votre_clé_secrète' par votre clé secrète réelle
-
-        // Enregistrement de la géolocalisation de l'utilisateur
         const { latitude, longitude } = req.body;
-        const newLocalisation = await geolocalisation.create({
+        if (!latitude || !longitude) {
+            return res.status(400).json({ success: false, message: "Les coordonnées de latitude et longitude sont requises." });
+        }
+
+        await DB.geolocalisationModel.create({
             userId: user.id,
             latitude,
             longitude
         });
-
-        console.log('Authentification réussie');
-        // Authentification réussie
-        return res.status(200).json({ success: true, message: "Connexion réussie", user });
+       
+        req.session.userId = user.id;
+        req.session.save(err => {
+            if (err) {
+                console.error('Erreur lors de la sauvegarde de la session:', err);
+                return res.status(500).json({ success: false, message: "Une erreur est survenue lors de la sauvegarde de la session" });
+            }
+            console.log('Session sauvegardée:', req.session);
+            return res.status(200).json({ success: true, message: "Connexion réussie", userId:user.id });
+        });
     } catch (error) {
         console.error('Erreur lors de la connexion :', error);
         res.status(500).json({ success: false, message: "Une erreur est survenue lors de la connexion" });
     }
 };
 
-  const auth = async (req, res) => {
-  
+ 
 
+const auth = async (req, res) => {
     try {
-         // Validation des données
-         const errors = validationResult(req);
-         if (!errors.isEmpty()) {
-             const errorMessages = errors.array().map(error => error.msg);
-           
-            // const errorMessages= "Le mot de passe doit y avoir 8 carèctéres maximmum, au moins une lettre en majuscule, un chiffre et un carèctére spéciaux"
-             console.log("Erreurs de validation : ", errorMessages);
-             return res.status(422).json({ errors: errorMessages });
-         }
-   else{
-    const saltRounds = 10;
-    const newAuth = new registerModel();
-    newAuth.firstname = req.body.firstname;
-    newAuth.lastname = req.body.lastname;
-    newAuth.email = req.body.email;
-
-    const salt = await bcrypt.genSalt(saltRounds);
-    const hashedPassword = await bcrypt.hash(req.body.password, salt);
-    newAuth.password = hashedPassword;
-    newAuth.address = req.body.address;
-    newAuth.phone = req.body.phone;
-
-    await newAuth.save();
-
-    // return res.status(200).json({ success: true, message: "Utilisateur enregistré avec succès.", user: newAuth });
-    console.log("l'utilisateur est bien enregistrer");
-} 
-   }
-   catch (error) {
-    console.error('Erreur lors de l\'enregistrement de l\'utilisateur:', error);
-    return res.status(500).json({ success: false, error: 'Erreur lors de l\'enregistrement de l\'utilisateur.' });
-}
-       
+      // Validation des données
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        const errorMessages = errors.array().map(error => error.msg);
+        console.log("Erreurs de validation : ", errorMessages);
+        return res.status(422).json({ errors: errorMessages });
+      }
+      const photoProfil = req.file ? `http://localhost:5000/photoProfil/${req.file.filename}` : '';
+      const { email, firstname, lastname, password, address, phone } = req.body;
+  
+      // Vérification de l'existence de l'utilisateur
+      const existingUser = await DB.User.findOne({ where: { email } });
+      if (existingUser) {
+        return res.status(400).json({ success: false, message: "L'email est déjà utilisé." });
+      }
+  
+      const saltRounds = 10;
+      const salt = await bcrypt.genSalt(saltRounds);
+      const hashedPassword = await bcrypt.hash(password, salt);
+  
+      const newAuth = new DB.User({
+        firstname,
+        lastname,
+        email,
+        password: hashedPassword,
+        address,
+        phone,
+        photoProfil: photoProfil
+      });
+  
+      await newAuth.save();
+  
+      console.log("L'utilisateur est bien enregistré");
+      return res.status(200).json({ success: true, message: "Utilisateur enregistré avec succès.", user: newAuth });
+  
+    } catch (error) {
+      console.error("Erreur lors de l'enregistrement de l'utilisateur:", error);
+      return res.status(500).json({ success: false, error: "Erreur lors de l'enregistrement de l'utilisateur." });
+    }
+  };
+const deconnecteSession = async (req,res) => {
+   
+    req.session.destroy((err) => {
+        if (err) {
+            return res.status(500).json({ success: false, message: "Erreur lors de la déconnexion" });
+        }
+        res.status(200).json({ success: true, message: "Déconnexion réussie" });
+    });
 };
 
+
+const getUser = async(req, res)=>{
+    
+    try{
+        const tousUser = await DB.User.findAll()
+
+        return res.json(tousUser);
+    }catch(error){
+      console.error('l\'utilisateur n\'as pas pu etre récupérer', error );
+      res.status(500).json({status:false, message:'Une erreurs est servenu'})
+    }
+
+}
 module.exports = {
     login,
-    auth
+    auth,
+    deconnecteSession,
+    getUser
 };
